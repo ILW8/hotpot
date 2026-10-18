@@ -1,6 +1,6 @@
 use std::ops::Range;
 use std::str::FromStr;
-use std::{f64::consts::PI, ops::RangeInclusive};
+use std::f64::consts::PI;
 
 use anyhow::{Result, anyhow};
 use geo_types::{Coord, Point};
@@ -42,40 +42,6 @@ impl TileBounds {
             ymin: tile.y << zoom_steps,
             xmax: (tile.x + 1) << zoom_steps,
             ymax: (tile.y + 1) << zoom_steps,
-        }
-    }
-
-    pub fn from_viewport(
-        viewport: &WebMercatorViewport,
-        viewport_width: u32,
-        viewport_height: u32,
-        zoom_range: RangeInclusive<u32>,
-    ) -> Self {
-        let tile_size = 256;
-
-        let min_zoom = *zoom_range.start();
-        let max_zoom = *zoom_range.end();
-
-        let sw_px = viewport.sw.to_mercator_pixel(max_zoom as u8, tile_size);
-        let ne_px = viewport.ne.to_mercator_pixel(max_zoom as u8, tile_size);
-
-        let scale = f64::max(
-            (ne_px.x - sw_px.x) / (viewport_width as f64),
-            (sw_px.y - ne_px.y) / (viewport_height as f64),
-        );
-
-        // Find the smallest zoom level which will cover our viewport at full
-        // resolution.
-        let zoom = (max_zoom - scale.log2().floor() as u32).clamp(min_zoom, max_zoom) as u8;
-        let sw_tile = viewport.sw.tile(zoom);
-        let ne_tile = viewport.ne.tile(zoom);
-
-        TileBounds {
-            z: zoom,
-            xmin: sw_tile.x,
-            xmax: ne_tile.x,
-            ymin: ne_tile.y,
-            ymax: sw_tile.y,
         }
     }
 }

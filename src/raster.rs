@@ -1,6 +1,5 @@
 use std::error::Error;
 use std::fmt::Display;
-use std::ops::RangeInclusive;
 use std::str::FromStr;
 
 use anyhow::{Result, anyhow};
@@ -38,28 +37,26 @@ pub static ORANGE: LinearGradient = LinearGradient::from_stops(&[
 
 pub struct TileRaster {
     bounds: TileBounds,
-    scale: u32,
+    /// Width of the target tile in source tile coordinates.
+    source_width: u64,
     width: u32,
     tile_extent: u32,
     pixels: Vec<u8>,
 }
 
 impl TileRaster {
+    /// `width` can be any size, so views can be rendered at fractional zoom levels.
     fn new(tile: Tile, source: TileBounds, width: u32, tile_extent: u32) -> Self {
-        // TODO: support upscaling
-        debug_assert!(width <= tile_extent, "Upscaling not supported");
-        debug_assert!(width.is_power_of_two(), "width must be power of two");
         debug_assert!(source.z >= tile.z, "source zoom must be >= target zoom");
 
         let zoom_steps = (source.z - tile.z) as u32;
-        let width_steps = tile_extent.ilog2() - width.ilog2();
 
         Self {
             width,
             tile_extent,
             pixels: vec![0; (width * width) as usize],
             bounds: source,
-            scale: zoom_steps + width_steps,
+            source_width: (tile_extent as u64) << zoom_steps,
         }
     }
 
@@ -84,9 +81,10 @@ impl TileRaster {
             let x = x + x_offset;
             let y = (self.tile_extent - y) + y_offset;
 
-            // Scale the coordinates back down to [0..width]
-            let x = x >> self.scale;
-            let y = y >> self.scale;
+            // Scale the coordinates to [0..width]. Same as a right shift when
+            // width is a power of two.
+            let x = (x as u64 * self.width as u64 / self.source_width) as u32;
+            let y = (y as u64 * self.width as u64 / self.source_width) as u32;
 
             // Apply mask in tile pixel space
             if mask.is_hidden(x as i32, y as i32) {
@@ -349,81 +347,69 @@ pub fn render_view(
     db: &Database,
     config: &Config,
 ) -> Result<Vec<u8>> {
-    let tile_size = 256;
-    let zoom_range = RangeInclusive::new(
-        *config.zoom_levels.iter().min().unwrap() as u32,
-        *config.zoom_levels.iter().max().unwrap() as u32,
-    );
+    let base = 256;
+    let min_zoom = *config.zoom_levels.iter().min().unwrap() as i32;
+    let max_zoom = *config.zoom_levels.iter().max().unwrap() as i32;
 
-    let tile_bounds = TileBounds::from_viewport(&viewport, width, height, zoom_range);
-
-    let num_x = tile_bounds.xmax - tile_bounds.xmin + 1;
-    let num_y = tile_bounds.ymax - tile_bounds.ymin + 1;
-
-    let (src_w, src_h) = (num_x * tile_size, num_y * tile_size);
-    let (img_w, img_h) = (u32::min(width, src_w), u32::min(height, src_h));
-
-    if img_w < width || img_h < height {
-        tracing::warn!(
-            "source data is not high resolution for requested image dimensions, clamping to {}x{}.",
-            img_w,
-            img_h
-        );
+    // Fractional zoom at which the viewport just fits the image.
+    let sw = viewport.sw.to_mercator_pixel(0, base);
+    let ne = viewport.ne.to_mercator_pixel(0, base);
+    let scale = f64::max((ne.x - sw.x) / width as f64, (sw.y - ne.y) / height as f64);
+    if !(scale.is_finite() && scale > 0.0) {
+        return Err(anyhow!("viewport has no area"));
     }
+    let zoom = -scale.log2();
+
+    // Rasterize tiles from the integer zoom level below at whatever pixel
+    // size makes up the difference, so lines stay one pixel wide. The epsilon
+    // keeps bounds that land exactly on a level from rounding down to the next.
+    let z = ((zoom + 1e-6).floor() as i32).clamp(min_zoom, max_zoom) as u8;
+    let tile_size = (base as f64 * (zoom - z as f64).exp2()).round().max(1.0) as u32;
+
+    // Image origin in zoom `z` pixels at `tile_size`, centred on the viewport.
+    let px_per_base = tile_size as f64 * (1u64 << z) as f64 / base as f64;
+    let left = ((sw.x + ne.x) / 2.0 * px_per_base - width as f64 / 2.0).round() as i64;
+    let top = ((sw.y + ne.y) / 2.0 * px_per_base - height as f64 / 2.0).round() as i64;
+
+    let ts = tile_size as i64;
+    let tiles = 0..(1i64 << z);
+    let tile_positions: Vec<_> = (top.div_euclid(ts)..=(top + height as i64 - 1).div_euclid(ts))
+        .flat_map(|ty| {
+            (left.div_euclid(ts)..=(left + width as i64 - 1).div_euclid(ts)).map(move |tx| (tx, ty))
+        })
+        .filter(|(tx, ty)| tiles.contains(tx) && tiles.contains(ty))
+        .collect();
 
     tracing::debug!(
-        num_tiles = num_x * num_y,
-        zoom = tile_bounds.z,
+        num_tiles = tile_positions.len(),
+        zoom = z,
+        tile_size,
         "rendering subtiles"
     );
-
-    let mut mosaic = vec![0u8; (img_w * img_h) as usize];
-
-    // The tile bounds will be aligned to the tile grid, so we need to trim
-    // the excess pixels from the edges of the image.
-    let margin_x = (src_w - img_w) / 2;
-    let margin_y = (src_h - img_h) / 2;
-
-    // Collect all tile positions for parallel processing
-    let tile_positions: Vec<_> = (0..num_y)
-        .flat_map(|row| (0..num_x).map(move |col| (row, col)))
-        .collect();
 
     // Render tiles in parallel
     let tile_results: Vec<_> = tile_positions
         .par_iter()
-        .map(|(row, col)| {
-            let tile = Tile::new(
-                tile_bounds.xmin + col,
-                tile_bounds.ymin + row,
-                tile_bounds.z,
-            );
-
-            // Position of the tile in the mosaic
-            let tile_origin_y = row * tile_size;
-            let tile_origin_x = col * tile_size;
-
+        .map(|&(tx, ty)| {
+            let tile = Tile::new(tx as u32, ty as u32, z);
             rasterize_tile(tile, tile_size, filter, db, config)
-                .map(|img| img.map(|img| (tile_origin_x, tile_origin_y, img)))
+                .map(|img| img.map(|img| (tx * ts - left, ty * ts - top, img)))
         })
         .collect();
 
+    let mut mosaic = vec![0u8; (width * height) as usize];
     for result in tile_results {
-        if let Some((tile_origin_x, tile_origin_y, raster)) = result? {
+        if let Some((origin_x, origin_y, raster)) = result? {
             for (x, y, pixel) in raster.enumerate_pixels() {
-                let x = tile_origin_x + x as u32;
-                let y = tile_origin_y + y as u32;
-
-                // Ignore pixels which fall into the margins
-                if x >= margin_x && x < margin_x + img_w && y >= margin_y && y < margin_y + img_h {
-                    let (mx, my) = (x - margin_x, y - margin_y);
-                    mosaic[(my * img_w + mx) as usize] = pixel;
+                let (mx, my) = (origin_x + x as i64, origin_y + y as i64);
+                if (0..width as i64).contains(&mx) && (0..height as i64).contains(&my) {
+                    mosaic[(my as u32 * width + mx as u32) as usize] = pixel;
                 }
             }
         }
     }
 
-    Ok(encode_indexed_png(&mosaic, img_w, img_h, gradient))
+    Ok(encode_indexed_png(&mosaic, width, height, gradient))
 }
 
 pub fn rasterize_tile(
@@ -631,5 +617,56 @@ mod tests {
 
         assert!(without_join.pixels.iter().any(|&p| p > 0));
         assert_eq!(without_join.pixels, with_join.pixels);
+    }
+
+    #[test]
+    fn test_non_power_of_two_widths() {
+        let db = Database::memory().unwrap();
+        let config = db.load_config().unwrap();
+
+        // A horizontal line across the middle of a tile at the finest stored level.
+        let tile = Tile::new(32740, 21790, 16);
+        let mut coords = Vec::new();
+        for (x, y) in [(0u16, 1024u16), (2047, 1024)] {
+            coords.extend_from_slice(&x.to_le_bytes());
+            coords.extend_from_slice(&y.to_le_bytes());
+        }
+        {
+            let conn = db.connection().unwrap();
+            conn.execute(
+                "INSERT INTO activities (id, file, title, start_time, properties) \
+                 VALUES (1, 'line.gpx', 'line', '2020-06-01T12:00:00Z', jsonb('{}'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO activity_tiles (activity_id, z, x, y, coords) VALUES (1, ?, ?, ?, ?)",
+                params![tile.z, tile.x, tile.y, &coords],
+            )
+            .unwrap();
+        }
+
+        let filter = ActivityFilter::default();
+        for width in [256u32, 300, 600] {
+            let raster = rasterize_tile(tile, width, &filter, &db, &config)
+                .unwrap()
+                .expect("expected activity data");
+            let lit: Vec<_> = raster.enumerate_pixels().filter(|(_, _, p)| *p > 0).collect();
+            assert_eq!(lit.len(), width as usize, "width {width}");
+            assert!(lit.iter().all(|&(_, y, _)| y == width as usize / 2), "width {width}");
+        }
+
+        // Rendering exactly that tile's bounds at 300 px (zoom 16.23) gives the same pixels.
+        let b = tile.xy_bounds();
+        let viewport = WebMercatorViewport {
+            sw: crate::tile::WebMercator(geo_types::Point::new(b.left, b.bot)),
+            ne: crate::tile::WebMercator(geo_types::Point::new(b.right, b.top)),
+        };
+        let png = render_view(viewport, &PINKISH, 300, 300, &filter, &db, &config).unwrap();
+        let mut reader = png::Decoder::new(std::io::Cursor::new(&png)).read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let frame = reader.next_frame(&mut buf).unwrap();
+        let raster = rasterize_tile(tile, 300, &filter, &db, &config).unwrap().unwrap();
+        assert_eq!(&buf[..frame.buffer_size()], raster.pixels.as_slice());
     }
 }
