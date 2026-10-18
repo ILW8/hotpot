@@ -11,6 +11,7 @@ use hotpot::activity::PropertySource;
 
 use hotpot::db::{ActivityFilter, Database};
 use hotpot::external::intervals_icu::{IntervalsIcuAuth, IntervalsIcuClient};
+use hotpot::external::owntracks::OwntracksClient;
 use hotpot::filter::PropertyFilter;
 use hotpot::raster::{LinearGradient, PINKISH};
 use hotpot::tile::WebMercatorViewport;
@@ -246,6 +247,13 @@ enum FetchSource {
     ///
     /// Requires the `INTERVALS_ICU_API_KEY` environment variable.
     IntervalsIcu,
+
+    /// Fetch location history from an OwnTracks Recorder.
+    ///
+    /// Requires the `OWNTRACKS_URL` and `OWNTRACKS_USER` environment
+    /// variables. Set `OWNTRACKS_DEVICE` to fetch a single device, otherwise
+    /// all of the user's devices are fetched.
+    Owntracks,
 }
 
 #[derive(Args)]
@@ -544,6 +552,13 @@ fn command_fetch(global: GlobalOpts, args: FetchCmdArgs) -> Result<()> {
             let client = IntervalsIcuClient::new(&auth);
             let added = rt.block_on(client.fetch(&db, &db_config, lookback))?;
             (added, "intervals.icu")
+        }
+        FetchSource::Owntracks => {
+            let client = OwntracksClient::from_env().ok_or_else(|| {
+                anyhow!("OWNTRACKS_URL and OWNTRACKS_USER environment variables must be set")
+            })?;
+            let added = rt.block_on(client.fetch(&db, &db_config, lookback))?;
+            (added, "OwnTracks")
         }
     };
 
