@@ -97,7 +97,8 @@ hotpot render \
 ```
 
 To construct the bounds, use a tool such as
-[Klokantech bounding box](https://boundingbox.klokantech.com/).
+[Klokantech bounding box](https://boundingbox.klokantech.com/). The bounds are
+scaled to fit the image and centred on it, at any zoom level, not just whole ones.
 
 For full details about the CLI, run `hotpot --help`.
 
