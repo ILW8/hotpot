@@ -112,6 +112,23 @@
             <div id="warnings-container"></div>
         </details>
     </div>
+    <div id="nearby" hidden>
+        <div class="__header">
+            <span id="nearby-count"></span>
+            <label for="radius">within</label>
+            <select key="radius" name="radius" id="radius">
+                <option value="10">10 m</option>
+                <option value="25">25 m</option>
+                <option value="50" selected>50 m</option>
+                <option value="100">100 m</option>
+                <option value="250">250 m</option>
+                <option value="500">500 m</option>
+                <option value="1000">1 km</option>
+            </select>
+            <button id="nearby-close" title="Close">×</button>
+        </div>
+        <div id="nearby-list"></div>
+    </div>
 
     <script>
         const mapStyleBlack = {
@@ -187,6 +204,7 @@
             filter: null,
             gradient: null,
             rasterUrl: null,
+            radius: "50",
             ...getUrlHashParameters(),
 
             $color: ({ color }) => (color === "custom" ? null : color),
@@ -298,7 +316,7 @@
         });
 
         // Wire up form to reactive data stuff
-        document.querySelectorAll("#map-overlay [key]").forEach((el) => {
+        document.querySelectorAll("#map-overlay [key], #nearby [key]").forEach((el) => {
             const key = el.getAttribute("key");
             const handler = (ev) => (options[key] = el.value);
             el.addEventListener(
@@ -326,6 +344,8 @@
                 type: "raster",
                 source: "hotpot",
             });
+
+            nearby?.addLayer();
         }
 
         map.on("load", () => updateMapTileSource());
@@ -336,6 +356,10 @@
 
         globalThis.RENDER_ENABLED &&
             map.addControl(new ExportButton(options), "top-right");
+
+        const nearby = globalThis.NEARBY_ENABLED
+            ? new NearbyPanel(map, options)
+            : null;
 
         nodes.properties.addEventListener("click", () =>
             createPropertyModal(globalThis.ACTIVITY_PROPERTIES),
