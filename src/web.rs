@@ -13,7 +13,7 @@ use axum::http::{HeaderMap, Method, Request, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Router, Server, TypedHeader};
+use axum::{Json, Router, Server, TypedHeader};
 use rust_embed::Embed;
 use serde::{Deserialize, Deserializer};
 use time::Date;
@@ -29,8 +29,8 @@ use crate::filter::PropertyFilter;
 use crate::raster::LinearGradient;
 use crate::strava;
 use crate::strava::StravaAuth;
-use crate::tile::{Tile, WebMercatorViewport};
-use crate::{activity, raster};
+use crate::tile::{LngLat, Tile, WebMercatorViewport};
+use crate::{activity, nearby, raster};
 
 #[derive(Clone)]
 pub struct Config {
@@ -47,6 +47,7 @@ pub struct RouteConfig {
     pub upload: bool,
     pub render: bool,
     pub fetch: bool,
+    pub nearby: bool,
 }
 
 #[derive(Embed)]
@@ -117,6 +118,14 @@ impl Config {
             tracing::info!("/render (image export)");
 
             router = router.route("/render", get(render_viewport));
+        }
+
+        if self.routes.nearby {
+            tracing::info!("/api/nearby, /api/track/:id (activities near a point)");
+
+            router = router
+                .route("/api/nearby", get(get_nearby))
+                .route("/api/track/:id", get(get_track));
         }
 
         let intervals_icu = IntervalsIcuAuth::from_env();
@@ -202,9 +211,10 @@ async fn index(State(AppState { config, db, .. }): State<AppState>) -> impl Into
             "\
             globalThis.UPLOADS_ENABLED = {};
             globalThis.RENDER_ENABLED = {};
+            globalThis.NEARBY_ENABLED = {};
             globalThis.ACTIVITY_PROPERTIES = {};
         ",
-            config.routes.upload, config.routes.render, properties,
+            config.routes.upload, config.routes.render, config.routes.nearby, properties,
         )
         .as_str(),
     );
@@ -302,6 +312,54 @@ async fn get_activity_count(
         .expect("failed to count activities");
 
     (StatusCode::OK, num_activities.to_string()).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct NearbyQueryParams {
+    lat: f64,
+    lng: f64,
+    /// Meters.
+    radius: f64,
+    #[serde(default, with = "crate::date::parse")]
+    before: Option<Date>,
+    #[serde(default, with = "crate::date::parse")]
+    after: Option<Date>,
+    #[serde(default)]
+    filter: Option<PropertyFilter>,
+}
+
+async fn get_nearby(
+    State(AppState { db, db_config, .. }): State<AppState>,
+    Query(params): Query<NearbyQueryParams>,
+) -> impl IntoResponse {
+    if !(1.0..=nearby::MAX_RADIUS).contains(&params.radius) {
+        let msg = format!("radius must be in [1, {}] meters", nearby::MAX_RADIUS);
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+
+    let pt = LngLat::new(params.lng, params.lat);
+    let filter = ActivityFilter::new(params.before, params.after, params.filter);
+
+    match nearby::find(&db, &db_config, pt, params.radius, &filter) {
+        Ok(found) => Json(found).into_response(),
+        Err(err) => {
+            tracing::error!("nearby query failed: {:?}", err);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+async fn get_track(
+    State(AppState { db, db_config, .. }): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match nearby::track(&db, &db_config, id) {
+        Ok(geojson) => Json(geojson).into_response(),
+        Err(err) => {
+            tracing::error!("track query failed: {:?}", err);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 async fn render_viewport(
@@ -639,6 +697,7 @@ mod tests {
                 upload: false,
                 render: true,
                 fetch: false,
+                nearby: false,
             },
         }
         .build_router(db)

@@ -209,6 +209,13 @@ struct ServeCmdArgs {
     #[arg(long, default_value = "false")]
     fetch: bool,
 
+    /// Click the map to list the activities passing nearby, via
+    /// `/api/nearby`.
+    ///
+    /// Exposes activity names, times, and individual tracks.
+    #[arg(long, default_value = "false")]
+    nearby: bool,
+
     /// Enable Strava activity webhook
     ///
     /// Use `strava-auth` subcommand to grab OAuth tokens.
@@ -487,6 +494,7 @@ fn command_serve(global: GlobalOpts, args: ServeCmdArgs) -> Result<()> {
         upload,
         render,
         fetch,
+        nearby,
         strava_webhook,
         cors,
     } = args;
@@ -498,6 +506,7 @@ fn command_serve(global: GlobalOpts, args: ServeCmdArgs) -> Result<()> {
         upload,
         render,
         fetch,
+        nearby,
         tiles: true,
         strava_auth: false,
     };
@@ -522,6 +531,7 @@ fn command_strava_auth(global: GlobalOpts, args: StravaAuthCmdArgs) -> Result<()
         upload: false,
         render: false,
         fetch: false,
+        nearby: false,
     };
 
     let config = web::Config {
