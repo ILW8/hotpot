@@ -117,7 +117,9 @@ impl TileClipper {
     }
 
     fn finish_segment(&mut self) {
-        if let Some((tile, _)) = self.current {
+        // Forget the tile too: the next segment may start anywhere, and
+        // clipping it against a stale tile would drop it.
+        if let Some((tile, _)) = self.current.take() {
             self.tiles.entry(tile).and_modify(|lines| {
                 lines.push(LineString::new(vec![]));
             });
@@ -206,6 +208,9 @@ impl RawActivity {
                     // Skip over large jumps
                     let len = p0.0.euclidean_distance(&p1.0);
                     if len > max_point_distance {
+                        for clip in clippers.iter_mut() {
+                            clip.finish_segment();
+                        }
                         continue;
                     }
 
@@ -842,6 +847,34 @@ mod tests {
         // A straight line enters one new tile per grid line it crosses.
         let crossed = a.x.abs_diff(b.x) + a.y.abs_diff(b.y);
         assert_eq!(tiles.len() as u32, crossed + 1, "{tiles:?}");
+    }
+
+    #[test]
+    fn test_clip_keeps_segments_after_track_breaks() {
+        // A second line, then a > 5 km jump within it: the segment after
+        // each break starts away from the tile the clipper was last in.
+        let first = vec![(-0.13, 51.5), (-0.1299, 51.5)];
+        let second = vec![
+            (-0.10, 51.52),
+            (-0.0999, 51.52),
+            (0.01, 51.52),
+            (0.0101, 51.52),
+        ];
+        let activity = RawActivity {
+            tracks: MultiLineString::new(vec![first.clone().into(), second.clone().into()]),
+            ..test_activity(vec![])
+        };
+        let tile = |(lng, lat)| LngLat::from(Point::new(lng, lat)).xy().unwrap().tile(16);
+
+        let tiles: HashSet<_> = activity
+            .clip_to_tiles(&db::Config::default())
+            .iter()
+            .filter_map(|(t, _)| (t.z == 16).then_some(*t))
+            .collect();
+
+        for pt in first.into_iter().chain(second) {
+            assert!(tiles.contains(&tile(pt)), "{pt:?} missing from {tiles:?}");
+        }
     }
 
     #[test]
