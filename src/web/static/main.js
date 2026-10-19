@@ -403,6 +403,199 @@ class ExportButton {
   }
 }
 
+// Approximate circle around `center` as a GeoJSON LineString.
+function circle({ lng, lat }, meters, steps = 64) {
+  const dLat = meters / 111320;
+  const dLng = dLat / Math.cos((lat * Math.PI) / 180);
+  const coordinates = [...Array(steps + 1).keys()].map((i) => {
+    const angle = (i / steps) * 2 * Math.PI;
+    return [lng + dLng * Math.cos(angle), lat + dLat * Math.sin(angle)];
+  });
+  return { type: "LineString", coordinates };
+}
+
+// Click the map to list the activities passing within `options.radius` of
+// that point. Hovering a row highlights its track; clicking keeps it.
+class NearbyPanel {
+  static dateFormat = new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+
+  constructor(map, options) {
+    const byId = (id) => document.getElementById(id);
+    this.map = map;
+    this.options = options;
+    this.node = byId("nearby");
+    this.list = byId("nearby-list");
+    this.count = byId("nearby-count");
+
+    this.point = null;
+    this.hovered = null;
+    this.selected = null;
+    this.tracks = new Map();
+    this.requests = 0;
+    this.data = { type: "FeatureCollection", features: [] };
+
+    map.on("click", (ev) => {
+      this.point = ev.lngLat.wrap();
+      this.selected = null;
+      this.update();
+    });
+    options.watch(["radius", "before", "after", "filter"], () => this.update());
+    this.list.addEventListener("mouseleave", () => this.highlight(null));
+    byId("nearby-close").addEventListener("click", () => {
+      this.point = null;
+      this.node.hidden = true;
+      this.draw();
+    });
+  }
+
+  // Call after (re-)adding the heatmap layer, so this stays on top.
+  addLayer() {
+    if (this.map.getSource("nearby")) {
+      this.map.removeLayer("nearby").removeSource("nearby");
+    }
+
+    this.map
+      .addSource("nearby", { type: "geojson", data: this.data })
+      .addLayer({
+        id: "nearby",
+        type: "line",
+        source: "nearby",
+        paint: {
+          "line-color": ["get", "color"],
+          "line-width": ["get", "width"],
+        },
+      });
+  }
+
+  async update() {
+    if (!this.point) return;
+
+    const { div } = createElement;
+    const { lng, lat } = this.point;
+    const { radius, before, after, filter } = this.options;
+    const qs = encodeQueryString({ lat, lng, radius, before, after, filter });
+
+    this.node.hidden = false;
+    this.count.innerText = "• • •";
+    this.draw();
+
+    const request = ++this.requests;
+    const [ok, body] = await fetch(`/api/nearby?${qs}`)
+      .then(async (res) => [res.ok, res.ok ? await res.json() : await res.text()])
+      .catch((err) => [false, err.toString()]);
+
+    // A newer click or setting change took over.
+    if (request !== this.requests) return;
+
+    if (!ok) {
+      this.count.innerText = "Error";
+      this.list.replaceChildren(div({ class: "__note" }, body));
+      return;
+    }
+
+    const { total, activities } = body;
+    const note =
+      total === 0
+        ? "Nothing passes this close."
+        : total > activities.length
+          ? `Newest ${activities.length} shown. Narrow the radius, dates or filter to see older ones.`
+          : null;
+
+    this.count.innerText = `${total} ${total === 1 ? "activity" : "activities"}`;
+    this.list.replaceChildren(
+      ...activities.map((act) => this.row(act)),
+      ...(note ? [div({ class: "__note" }, note)] : []),
+    );
+  }
+
+  row(act) {
+    const { div, span, a } = createElement;
+    const strava = act.file.match(/^strava:(\d+)$/);
+    const meta = [
+      act.activity_type,
+      act.total_distance != null && `${act.total_distance.toFixed(1)} km`,
+      act.start_time &&
+        NearbyPanel.dateFormat.format(new Date(act.start_time)),
+      `${Math.round(act.distance)} m away`,
+    ];
+
+    return div(
+      {
+        class: "__row",
+        tabindex: 0,
+        title: act.file,
+        "data-id": act.id,
+        mouseenter: () => this.highlight(act.id),
+        focus: () => this.highlight(act.id),
+        click: () => this.highlight(act.id, true),
+      },
+      [
+        div({ class: "__title" }, [
+          span({}, act.name || act.activity_type || act.file),
+          strava
+            ? a(
+                {
+                  href: `https://www.strava.com/activities/${strava[1]}`,
+                  target: "_blank",
+                  rel: "noreferrer",
+                },
+                "Strava ↗",
+              )
+            : null,
+        ]),
+        div({ class: "__meta" }, meta.filter(Boolean).join(" · ")),
+      ],
+    );
+  }
+
+  highlight(id, select = false) {
+    this.hovered = id;
+    if (select) {
+      this.selected = id;
+      this.list
+        .querySelectorAll(".__row")
+        .forEach((row) =>
+          row.classList.toggle("--selected", +row.dataset.id === id),
+        );
+    }
+    this.draw();
+  }
+
+  get shown() {
+    return this.point && (this.hovered ?? this.selected);
+  }
+
+  async draw() {
+    const id = this.shown;
+    if (id && !this.tracks.has(id)) {
+      this.tracks.set(
+        id,
+        fetch(`/api/track/${id}`)
+          .then((res) => res.json())
+          .catch(() => null),
+      );
+    }
+    const track = id ? await this.tracks.get(id) : null;
+    if (id !== this.shown) return;
+
+    const feature = (geometry, color, width) => ({
+      type: "Feature",
+      geometry,
+      properties: { color, width },
+    });
+
+    this.data.features = [
+      this.point &&
+        feature(circle(this.point, +this.options.radius), "#6b8fff", 2),
+      track && feature(track, "#00e5ff", 3),
+    ].filter(Boolean);
+    this.map.getSource("nearby")?.setData(this.data);
+  }
+}
+
 class UploadButton {
   onAdd(_map) {
     const { div, button } = createElement;
