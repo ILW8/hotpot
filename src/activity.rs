@@ -86,9 +86,29 @@ impl TileClipper {
                 if b != end {
                     self.finish_segment();
 
-                    let (next_tile, next_bbox) = self.bounding_tile(&end);
+                    // `b` is on the edge we left through: step into the
+                    // neighboring tile, not the one holding `end`, so tiles in
+                    // between aren't skipped.
+                    let step = |v: f64, dv: f64, lo: f64, hi: f64| {
+                        if dv > 0.0 && v >= hi {
+                            1
+                        } else if dv < 0.0 && v <= lo {
+                            -1
+                        } else {
+                            0
+                        }
+                    };
+                    let (x, y) = (b.0.x(), b.0.y());
+                    let next_tile = Tile::new(
+                        tile.x
+                            .wrapping_add_signed(step(x, end.0.x() - x, bbox.left, bbox.right)),
+                        // Tile y grows southward, mercator y grows northward.
+                        tile.y
+                            .wrapping_add_signed(-step(y, end.0.y() - y, bbox.bot, bbox.top)),
+                        self.zoom,
+                    );
                     if next_tile != tile {
-                        self.current = Some((next_tile, next_bbox));
+                        self.current = Some((next_tile, next_tile.xy_bounds()));
                         self.add_line_segment(b, end);
                     }
                 }
@@ -804,6 +824,24 @@ mod tests {
             properties: HashMap::new(),
             tracks: MultiLineString::from(LineString::from(coords)),
         }
+    }
+
+    #[test]
+    fn test_clip_keeps_every_crossed_tile() {
+        // One segment heading NE across a few z16 tiles in London.
+        let (start, end) = ((-0.13, 51.5), (-0.12, 51.505));
+        let tile = |(lng, lat)| LngLat::from(Point::new(lng, lat)).xy().unwrap().tile(16);
+        let (a, b) = (tile(start), tile(end));
+
+        let tiles: HashSet<_> = test_activity(vec![start, end])
+            .clip_to_tiles(&db::Config::default())
+            .iter()
+            .filter_map(|(t, _)| (t.z == 16).then_some(*t))
+            .collect();
+
+        // A straight line enters one new tile per grid line it crosses.
+        let crossed = a.x.abs_diff(b.x) + a.y.abs_diff(b.y);
+        assert_eq!(tiles.len() as u32, crossed + 1, "{tiles:?}");
     }
 
     #[test]
