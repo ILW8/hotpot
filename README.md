@@ -216,6 +216,7 @@ to the database:
 - Command line
 - HTTP upload
 - intervals.icu API integration
+- OwnTracks Recorder integration
 - Strava webhook
 
 ### Command line
@@ -288,6 +289,32 @@ intervals API for future activities.
 sqlite3 hotpot.sqlite3 \
     "INSERT OR REPLACE INTO config (key, value) VALUES ('fetch_cutoff', '2026-01-01')"
 ```
+
+### OwnTracks Recorder integration
+
+Location history from a self-hosted
+[OwnTracks Recorder](https://github.com/owntracks/recorder) can be pulled in the
+same way as intervals.icu. Fixes less accurate than 100m are dropped, and the
+rest are split into one activity per stretch of continuous tracking (a new one
+starts after a gap of more than 60s or 250m). Segments that might still be in
+progress are left for the next fetch.
+
+```bash
+# OWNTRACKS_DEVICE is optional, all of the user's devices are fetched without it
+export OWNTRACKS_URL=http://recorder.local:8083 \
+       OWNTRACKS_USER=alice \
+       OWNTRACKS_DEVICE=phone
+
+hotpot fetch owntracks --lookback 30
+
+# or, with `hotpot serve --fetch`
+curl -X POST \
+  https://hotpot.example.com/fetch/owntracks?lookback=30 \
+  --header "Authorization: Bearer $HOTPOT_UPLOAD_TOKEN"
+```
+
+Activities have `activity_type` set to `OwnTracks`, so travel by car or train
+can be hidden with a filter such as `average_speed < 25`.
 
 ### Strava webhook
 

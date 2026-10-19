@@ -24,6 +24,7 @@ use tracing::Level;
 
 use crate::db::{ActivityFilter, Config as DbConfig, Database};
 use crate::external::intervals_icu::{IntervalsIcuAuth, IntervalsIcuClient};
+use crate::external::owntracks::OwntracksClient;
 use crate::filter::PropertyFilter;
 use crate::raster::LinearGradient;
 use crate::strava;
@@ -58,6 +59,7 @@ pub struct AppState {
     pub db_config: Arc<DbConfig>,
     pub strava: Option<StravaAuth>,
     pub intervals_icu: Option<IntervalsIcuAuth>,
+    pub owntracks: Option<OwntracksClient>,
     pub config: Config,
 }
 
@@ -118,6 +120,7 @@ impl Config {
         }
 
         let intervals_icu = IntervalsIcuAuth::from_env();
+        let owntracks = OwntracksClient::from_env();
         if self.routes.fetch {
             tracing::info!("/fetch/:source");
 
@@ -155,6 +158,7 @@ impl Config {
                 config: self.clone(),
                 strava,
                 intervals_icu,
+                owntracks,
                 db: Arc::new(db),
                 db_config: Arc::new(db_config),
             });
@@ -547,6 +551,10 @@ async fn run_fetch(state: &AppState, source: &str, lookback: u32) -> Option<Resu
         "intervals.icu" => {
             let auth = state.intervals_icu.as_ref()?;
             let client = IntervalsIcuClient::new(auth);
+            Some(client.fetch(&state.db, &state.db_config, lookback).await)
+        }
+        "owntracks" => {
+            let client = state.owntracks.as_ref()?;
             Some(client.fetch(&state.db, &state.db_config, lookback).await)
         }
         _ => None,
