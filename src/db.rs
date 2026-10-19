@@ -70,6 +70,10 @@ impl Database {
         let manager = SqliteConnectionManager::file(path).with_init(|conn| {
             conn.pragma_update(None, "journal_mode", "WAL")?;
             conn.pragma_update(None, "synchronous", "OFF")?;
+            // Read pages straight from a mapping instead of a syscall + copy per page. Those
+            // reads dominated render time and didn't scale past ~4 threads; mapped, a 4K view
+            // renders ~5x faster. Files past this size fall back to normal reads for the rest.
+            conn.pragma_update(None, "mmap_size", 1i64 << 30)?;
             Ok(())
         });
 
