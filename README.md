@@ -86,6 +86,11 @@ To run a tile server and web UI on `http://localhost:8080`:
 hotpot serve
 ```
 
+Add `--nearby` to click the map and list the activities passing near that
+point, using the same date and property filters as the heatmap. This exposes
+activity names, times, and individual tracks, so think twice before enabling
+it on an internet-facing server.
+
 To generate a static image instead:
 
 ```bash
