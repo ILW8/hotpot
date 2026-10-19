@@ -134,8 +134,9 @@ impl ClippedTiles {
         self.0
             .iter()
             .flat_map(|clip| clip.tiles.iter())
-            .filter(|(_, lines)| !lines.is_empty())
             .flat_map(|(tile, lines)| lines.iter().map(move |line| (tile, line)))
+            // `finish_segment` leaves an empty line behind as a marker.
+            .filter(|(_, line)| line.0.len() > 1)
     }
 }
 
@@ -875,6 +876,31 @@ mod tests {
         for pt in first.into_iter().chain(second) {
             assert!(tiles.contains(&tile(pt)), "{pt:?} missing from {tiles:?}");
         }
+    }
+
+    #[test]
+    fn test_upsert_skips_lines_without_segments() {
+        let db = Database::memory().unwrap();
+        let mut conn = db.connection().unwrap();
+        let track = vec![(13.40, 52.52), (13.41, 52.53), (13.42, 52.54)];
+        upsert(
+            &mut conn,
+            "a.gpx",
+            test_activity(track),
+            &db::Config::default(),
+        )
+        .unwrap();
+
+        // Each point is 4 bytes, so a drawable line has at least 8.
+        let (rows, short): (i64, i64) = conn
+            .query_row(
+                "SELECT count(*), sum(length(coords) < 8) FROM activity_tiles",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(rows > 0);
+        assert_eq!(short, 0, "{short} of {rows} rows have < 2 points");
     }
 
     #[test]
