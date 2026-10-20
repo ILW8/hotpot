@@ -533,6 +533,15 @@ class NearbyPanel {
       this.setRadius(this.input.valueAsNumber || this.radius),
     );
     this.list.addEventListener("mouseleave", () => this.highlight(null));
+    // Watches the last row of the list while there are more to load.
+    this.pager = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return;
+        this.pager.disconnect();
+        this.more();
+      },
+      { root: this.list, rootMargin: "200px" },
+    );
     byId("nearby-close").addEventListener("click", () => {
       this.point = null;
       this.node.hidden = true;
@@ -608,43 +617,59 @@ class NearbyPanel {
   async update() {
     if (!this.point) return;
 
-    const { div } = createElement;
-    const { lng, lat } = this.point;
-    const { radius } = this;
-    const { before, after, filter } = this.options;
-    const qs = encodeQueryString({ lat, lng, radius, before, after, filter });
-
     this.node.hidden = false;
     this.count.innerText = "• • •";
+    this.pager.disconnect(); // the old list's next page is stale
     this.draw();
 
     const request = ++this.requests;
-    const [ok, body] = await fetch(`/api/nearby?${qs}`)
-      .then(async (res) => [res.ok, res.ok ? await res.json() : await res.text()])
-      .catch((err) => [false, err.toString()]);
+    const [ok, body] = await this.fetchPage(0);
 
     // A newer click or setting change took over.
     if (request !== this.requests) return;
 
-    if (!ok) {
-      this.count.innerText = "Error";
-      this.list.replaceChildren(div({ class: "__note" }, body));
-      return;
-    }
+    const { total } = body;
+    this.count.innerText = !ok
+      ? "Error"
+      : `${total} ${total === 1 ? "activity" : "activities"}`;
+    this.list.replaceChildren(...this.page(ok, body, 0));
+    this.list.scrollTop = 0; // else a deep scroll loads page two at once
+  }
+
+  // Appends the next page, once the last row scrolls near view.
+  async more() {
+    const request = this.requests;
+    const offset = this.list.querySelectorAll(".__row").length;
+    const [ok, body] = await this.fetchPage(offset);
+    if (request !== this.requests) return;
+    this.loading.replaceWith(...this.page(ok, body, offset));
+  }
+
+  fetchPage(offset) {
+    const { lng, lat } = this.point;
+    const { radius } = this;
+    const { before, after, filter } = this.options;
+    const qs = encodeQueryString({ lat, lng, radius, before, after, filter, offset });
+
+    return fetch(`/api/nearby?${qs}`)
+      .then(async (res) => [res.ok, res.ok ? await res.json() : await res.text()])
+      .catch((err) => [false, err.toString()]);
+  }
+
+  // The rows of a page, then a note: an error, "nothing found" or "loading".
+  page(ok, body, offset) {
+    const { div } = createElement;
+    if (!ok) return [div({ class: "__note" }, body)];
 
     const { total, activities } = body;
-    const note =
-      total === 0
-        ? "Nothing passes this close."
-        : total > activities.length
-          ? `Newest ${activities.length} shown. Narrow the radius, dates or filter to see older ones.`
-          : null;
+    const rows = activities.map((act) => this.row(act));
+    if (total === 0) return [div({ class: "__note" }, "Nothing passes this close.")];
+    // An empty page ends it too, should `total` count something it can't list.
+    if (!rows.length || offset + rows.length >= total) return rows;
 
-    this.count.innerText = `${total} ${total === 1 ? "activity" : "activities"}`;
-    this.list.replaceChildren(
-      ...activities.map((act) => this.row(act)),
-      ...(note ? [div({ class: "__note" }, note)] : []),
-    );
+    this.pager.observe(rows.at(-1));
+    this.loading = div({ class: "__note" }, "Loading more…");
+    return [...rows, this.loading];
   }
 
   row(act) {
