@@ -326,6 +326,9 @@ struct NearbyQueryParams {
     after: Option<Date>,
     #[serde(default)]
     filter: Option<PropertyFilter>,
+    /// Newest activities to skip, for paging.
+    #[serde(default)]
+    offset: usize,
 }
 
 async fn get_nearby(
@@ -341,7 +344,7 @@ async fn get_nearby(
     let pt = LngLat::new(params.lng, params.lat);
     let filter = ActivityFilter::new(params.before, params.after, params.filter);
 
-    match nearby::find(&db, &db_config, pt, params.radius, &filter) {
+    match nearby::find(&db, &db_config, pt, params.radius, &filter, params.offset) {
         Ok(found) => Json(found).into_response(),
         Err(err) => {
             tracing::error!("nearby query failed: {:?}", err);

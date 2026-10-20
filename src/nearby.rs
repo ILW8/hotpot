@@ -19,8 +19,8 @@ use time::OffsetDateTime;
 use crate::db::{ActivityFilter, Config, Database, decode_line};
 use crate::tile::{LngLat, Tile};
 
-/// Most activities returned by one query, newest first.
-const MAX_RESULTS: usize = 100;
+/// Activities returned per page, newest first.
+const PAGE_SIZE: usize = 100;
 
 #[derive(Debug, Serialize)]
 pub struct Nearby {
@@ -42,7 +42,7 @@ pub struct NearbyActivity {
     /// Closest approach to the point, in meters.
     distance: f64,
     // ponytail: every row carries its properties (~2 KB for a Strava ride),
-    // so ~200 KB at MAX_RESULTS. Fetch them per activity if that gets slow.
+    // so ~200 KB a page. Fetch them per activity if that gets slow.
     properties: Value,
 }
 
@@ -125,13 +125,15 @@ fn closest<'a>(pt: Coord, runs: impl Iterator<Item = &'a [Coord]>) -> Option<f64
         .min_by(f64::total_cmp)
 }
 
-/// Activities matching `filter` that pass within `radius` meters of `pt`.
+/// Activities matching `filter` that pass within `radius` meters of `pt`,
+/// skipping the newest `offset`.
 pub fn find(
     db: &Database,
     config: &Config,
     pt: LngLat,
     radius: f64,
     filter: &ActivityFilter,
+    offset: usize,
 ) -> Result<Nearby> {
     let grid = Grid::new(config);
     let (center, px_per_meter) = grid
@@ -195,12 +197,12 @@ pub fn find(
             JSON(properties) \
         FROM activities \
         WHERE id IN (SELECT value FROM json_each(?)) \
-        ORDER BY start_time DESC \
-        LIMIT ?",
+        ORDER BY start_time DESC, id DESC \
+        LIMIT ? OFFSET ?",
     )?;
 
     let activities = stmt
-        .query_map(params![ids, MAX_RESULTS], |row| {
+        .query_map(params![ids, PAGE_SIZE, offset], |row| {
             let id = row.get(0)?;
             Ok(NearbyActivity {
                 id,
@@ -311,7 +313,7 @@ mod tests {
         let filter = ActivityFilter::new(None, None, props);
         let pt = LngLat::new(-0.125, north(meters_north));
 
-        find(db, config, pt, radius, &filter)
+        find(db, config, pt, radius, &filter, 0)
             .unwrap()
             .activities
             .into_iter()
@@ -323,7 +325,7 @@ mod tests {
     fn test_distance_is_ground_meters() {
         let (db, config) = fixture(vec![]);
         let pt = LngLat::new(-0.125, north(30.0));
-        let found = find(&db, &config, pt, 50.0, &ActivityFilter::default()).unwrap();
+        let found = find(&db, &config, pt, 50.0, &ActivityFilter::default(), 0).unwrap();
 
         assert_eq!(found.total, 1);
         let dist = found.activities[0].distance;
@@ -339,6 +341,17 @@ mod tests {
         assert_eq!(names(&db, &config, 30.0, 35.0, ""), ["ride"]);
         // Newest first.
         assert_eq!(names(&db, &config, 100.0, 150.0, ""), ["run", "ride"]);
+    }
+
+    #[test]
+    fn test_offset_skips_newest() {
+        let (db, config) = fixture(vec![]);
+        let pt = LngLat::new(-0.125, north(100.0));
+        let found = find(&db, &config, pt, 150.0, &ActivityFilter::default(), 1).unwrap();
+
+        assert_eq!(found.total, 2);
+        assert_eq!(found.activities.len(), 1);
+        assert_eq!(found.activities[0].name.as_deref(), Some("ride"));
     }
 
     #[test]
