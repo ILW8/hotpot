@@ -438,6 +438,10 @@ function circle(center, meters, steps = 64) {
 // Whole meters, at least 10 (50 if not a number).
 const clampRadius = (meters) => Math.max(10, Math.round(meters)) || 50;
 
+// "850 m", or "10.3 km" past 1000 m.
+const formatMeters = (m) =>
+  m > 1000 ? `${+(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`;
+
 // An activity's properties as a sorted key/value list. `*_time` numbers are
 // shown as dates (epoch seconds) or h:mm:ss (durations), raw on hover.
 function propertyList(props) {
@@ -562,7 +566,7 @@ class NearbyPanel {
   setRadius(meters, commit = true) {
     this.radius = clampRadius(meters);
     this.input.value = this.radius;
-    this.label.innerText = `${this.radius} m`;
+    this.label.innerText = formatMeters(this.radius);
     if (commit) this.options.radius = `${this.radius}`;
     this.draw();
   }
@@ -650,7 +654,7 @@ class NearbyPanel {
       act.total_distance != null && `${act.total_distance.toFixed(1)} km`,
       act.start_time &&
         NearbyPanel.dateFormat.format(new Date(act.start_time)),
-      `${Math.round(act.distance)} m away`,
+      `${formatMeters(act.distance)} away`,
     ];
 
     const row = div(
