@@ -212,7 +212,7 @@ struct ServeCmdArgs {
     /// Click the map to list the activities passing nearby, via
     /// `/api/nearby`.
     ///
-    /// Exposes activity names, times, and individual tracks.
+    /// Exposes activity names, times, properties, and individual tracks.
     #[arg(long, default_value = "false")]
     nearby: bool,
 

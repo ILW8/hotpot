@@ -438,6 +438,31 @@ function circle(center, meters, steps = 64) {
 const clampRadius = (meters) =>
   Math.min(1000, Math.max(10, Math.round(meters))) || 50;
 
+// An activity's properties as a sorted key/value list. `*_time` numbers are
+// shown as dates (epoch seconds) or h:mm:ss (durations), raw on hover.
+function propertyList(props) {
+  const { dl, dt, dd } = createElement;
+  const pad = (n) => String(n).padStart(2, "0");
+  const time = (key, v) => {
+    if (typeof v !== "number" || !key.endsWith("_time")) return null;
+    if (v > 1e9) return NearbyPanel.dateFormat.format(new Date(v * 1000));
+    const s = Math.round(v);
+    return `${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`;
+  };
+
+  return dl(
+    {},
+    Object.keys(props)
+      .sort()
+      .map((key) => {
+        const v = props[key];
+        const nice = time(key, v);
+        const text = typeof v === "string" ? v : JSON.stringify(v);
+        return [dt({}, key), dd(nice ? { title: text } : {}, nice ?? text)];
+      }),
+  );
+}
+
 // Click the map to list the activities passing within `options.radius` of
 // that point. Hovering a row highlights its track; clicking keeps it. Drag
 // the handle on the circle, or type in the panel, to change the radius.
@@ -628,7 +653,7 @@ class NearbyPanel {
       `${Math.round(act.distance)} m away`,
     ];
 
-    return div(
+    const row = div(
       {
         class: "__row",
         tabindex: 0,
@@ -636,7 +661,12 @@ class NearbyPanel {
         "data-id": act.id,
         mouseenter: () => this.highlight(act.id),
         focus: () => this.highlight(act.id),
-        click: () => this.highlight(act.id, true),
+        click: () => {
+          // Built on first selection; CSS shows it only while selected.
+          if (!row.querySelector("dl")) row.append(propertyList(act.properties));
+          this.highlight(act.id, true);
+        },
+        keydown: (ev) => ev.key === "Enter" && row.click(),
       },
       [
         div({ class: "__title" }, [
@@ -655,6 +685,7 @@ class NearbyPanel {
         div({ class: "__meta" }, meta.filter(Boolean).join(" · ")),
       ],
     );
+    return row;
   }
 
   highlight(id, select = false) {
