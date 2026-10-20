@@ -347,6 +347,7 @@ pub fn render_view(
     db: &Database,
     config: &Config,
 ) -> Result<Vec<u8>> {
+    filter.resolve(db)?; // once, not in every parallel tile below
     let base = 256;
     let min_zoom = *config.zoom_levels.iter().min().unwrap() as i32;
     let max_zoom = *config.zoom_levels.iter().max().unwrap() as i32;
@@ -419,6 +420,7 @@ pub fn rasterize_tile(
     db: &Database,
     config: &Config,
 ) -> Result<Option<TileRaster>> {
+    filter.resolve(db)?;
     let masks = &config.activity_mask;
     let zoom_level = config
         .source_level(tile.z)

@@ -89,9 +89,11 @@ hotpot serve
 Add `--nearby` to click the map and list the activities passing near that
 point, using the same date and property filters as the heatmap. Drag the
 handle on the circle to change the search radius, and click a row to see all
-of its properties (the up and down arrows then move between rows). This
-exposes activity names, times, properties, and individual tracks, so think
-twice before enabling it on an internet-facing server.
+of its properties (the up and down arrows then move between rows). **Filter**
+adds the circle to the property filter as a `near()` term, so the heatmap only
+shows activities passing through it. This exposes activity names, times,
+properties, and individual tracks, so think twice before enabling it on an
+internet-facing server.
 
 To generate a static image instead:
 
@@ -163,6 +165,9 @@ name like "Morning%"
 # Check if property exists
 has? heart_rate
 
+# Passes within 150 m of a point (latitude, longitude)
+near(52.52000, 13.40500, 150)
+
 # Combine multiple expressions
 elapsed_time < 3600 && elevation_gain > 300
 elevation_gain > 1000 || (average_speed > 30 && commute = true)
@@ -170,6 +175,10 @@ elevation_gain > 1000 || (average_speed > 30 && commute = true)
 
 You can use any property key that was included when the activity was imported, but
 the exact names vary based on your data.
+
+`near()` looks at the tracks rather than the properties, ignoring parts hidden
+by [area masks](#privacy), so it matches the same activities as clicking the
+map with `--nearby`.
 
 In addition, several standard properties are computed automatically from the GPS
 data for all activities, regardless of how they were imported:

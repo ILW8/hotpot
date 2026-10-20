@@ -135,6 +135,88 @@ pub fn find(
     filter: &ActivityFilter,
     offset: usize,
 ) -> Result<Nearby> {
+    let nearest = scan(db, config, pt, radius, filter)?;
+
+    let ids = serde_json::to_string(&nearest.keys().collect::<Vec<_>>())?;
+    let conn = db.connection()?;
+    let mut stmt = conn.prepare(
+        "\
+        SELECT \
+            id, \
+            file, \
+            CAST(COALESCE(title, properties ->> 'activity_name') AS TEXT), \
+            start_time, \
+            CAST(properties ->> 'activity_type' AS TEXT), \
+            CAST(properties ->> 'total_distance' AS REAL), \
+            JSON(properties) \
+        FROM activities \
+        WHERE id IN (SELECT value FROM json_each(?)) \
+        ORDER BY start_time DESC, id DESC \
+        LIMIT ? OFFSET ?",
+    )?;
+
+    let activities = stmt
+        .query_map(params![ids, PAGE_SIZE, offset], |row| {
+            let id = row.get(0)?;
+            Ok(NearbyActivity {
+                id,
+                file: row.get(1)?,
+                name: row.get(2)?,
+                start_time: row.get(3)?,
+                activity_type: row.get(4)?,
+                total_distance: row.get(5)?,
+                distance: nearest[&id],
+                properties: serde_json::from_str(&row.get::<_, String>(6)?)
+                    .expect("activity `properties` should contain valid JSON"),
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+
+    Ok(Nearby {
+        total: nearest.len(),
+        activities,
+    })
+}
+
+/// Ids of the activities passing within `radius` meters of `pt`, as a JSON
+/// array, for the filter language's `near()`.
+pub fn ids_near(db: &Database, pt: LngLat, radius: f64) -> Result<String> {
+    // Every map tile asks again, so keep the answer until activities change.
+    let (count, last): (i64, i64) = db.connection()?.query_row(
+        "SELECT count(*), COALESCE(max(id), 0) FROM activities",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let key = format!("{},{},{radius},{count},{last}", pt.0.x(), pt.0.y());
+
+    // Held while scanning, so a screenful of tiles waits for one scan instead
+    // of each running its own.
+    let mut cache = db.near_ids.lock().unwrap();
+    if let Some(ids) = cache.get(&key) {
+        return Ok(ids.clone());
+    }
+    // ponytail: forgets everything when full, LRU if many circles are in use.
+    if cache.len() >= 32 {
+        cache.clear();
+    }
+
+    let config = db.load_config()?;
+    let nearest = scan(db, &config, pt, radius, &ActivityFilter::default())?;
+    let ids = serde_json::to_string(&nearest.keys().collect::<Vec<_>>())?;
+    cache.insert(key, ids.clone());
+    Ok(ids)
+}
+
+/// Closest approach in meters of each activity matching `filter` that passes
+/// within `radius` meters of `pt`.
+fn scan(
+    db: &Database,
+    config: &Config,
+    pt: LngLat,
+    radius: f64,
+    filter: &ActivityFilter,
+) -> Result<HashMap<i64, f64>> {
+    filter.resolve(db)?;
     let grid = Grid::new(config);
     let (center, px_per_meter) = grid
         .project(pt)
@@ -184,44 +266,8 @@ pub fn find(
         }
     }
 
-    let ids = serde_json::to_string(&nearest.keys().collect::<Vec<_>>())?;
-    let mut stmt = conn.prepare(
-        "\
-        SELECT \
-            id, \
-            file, \
-            CAST(COALESCE(title, properties ->> 'activity_name') AS TEXT), \
-            start_time, \
-            CAST(properties ->> 'activity_type' AS TEXT), \
-            CAST(properties ->> 'total_distance' AS REAL), \
-            JSON(properties) \
-        FROM activities \
-        WHERE id IN (SELECT value FROM json_each(?)) \
-        ORDER BY start_time DESC, id DESC \
-        LIMIT ? OFFSET ?",
-    )?;
-
-    let activities = stmt
-        .query_map(params![ids, PAGE_SIZE, offset], |row| {
-            let id = row.get(0)?;
-            Ok(NearbyActivity {
-                id,
-                file: row.get(1)?,
-                name: row.get(2)?,
-                start_time: row.get(3)?,
-                activity_type: row.get(4)?,
-                total_distance: row.get(5)?,
-                distance: nearest[&id] / px_per_meter,
-                properties: serde_json::from_str(&row.get::<_, String>(6)?)
-                    .expect("activity `properties` should contain valid JSON"),
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-
-    Ok(Nearby {
-        total: nearest.len(),
-        activities,
-    })
+    nearest.values_mut().for_each(|px| *px /= px_per_meter);
+    Ok(nearest)
 }
 
 /// An activity's track as a GeoJSON MultiLineString, without masked parts.
@@ -361,6 +407,22 @@ mod tests {
             names(&db, &config, 100.0, 150.0, "activity_type = Ride"),
             ["ride"]
         );
+    }
+
+    #[test]
+    fn test_near_filter() {
+        let (db, config) = fixture(vec![]);
+        let run = format!("near({}, -0.125, 10)", north(200.0));
+
+        assert_eq!(names(&db, &config, 100.0, 150.0, &run), ["run"]);
+        assert_eq!(
+            names(&db, &config, 100.0, 150.0, &format!("!({run})")),
+            ["ride"]
+        );
+
+        let filter = ActivityFilter::new(None, None, Some(run.parse().unwrap()));
+        assert_eq!(db.activity_count(&filter).unwrap(), 1);
+        assert_eq!(db.activity_info(&filter).unwrap().len(), 1);
     }
 
     #[test]
