@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 
 use anyhow::Result;
 use geo::LineString;
@@ -63,6 +64,8 @@ const MIGRATIONS: [&str; 3] = [
 
 pub struct Database {
     pool: r2d2::Pool<SqliteConnectionManager>,
+    /// Activity ids of recent `near()` filter terms, see `nearby::ids_near`.
+    pub(crate) near_ids: Mutex<HashMap<String, String>>,
 }
 
 impl Database {
@@ -105,7 +108,10 @@ impl Database {
         let config = Config::load_from(&mut conn)?;
         config.save(&mut conn)?;
 
-        Ok(Database { pool })
+        Ok(Database {
+            pool,
+            near_ids: Mutex::default(),
+        })
     }
 
     /// Open an existing database, fail if it doesn't exist
@@ -316,6 +322,15 @@ impl ActivityFilter {
         self.before.is_none() && self.after.is_none() && self.props.is_none()
     }
 
+    /// Looks up the activities of any `near()` terms, which SQL can't. Must
+    /// run before `to_query`; repeat calls are free.
+    pub fn resolve(&self, db: &Database) -> Result<()> {
+        match &self.props {
+            Some(props) => props.resolve(&mut |pt, radius| crate::nearby::ids_near(db, pt, radius)),
+            None => Ok(()),
+        }
+    }
+
     pub fn to_query<'a>(&'a self, params: &mut Vec<&'a dyn ToSql>) -> String {
         let mut clauses = String::from("true");
 
@@ -355,6 +370,7 @@ pub struct ActivityInfo {
 
 impl Database {
     pub fn activity_count(&self, filter: &ActivityFilter) -> Result<usize, anyhow::Error> {
+        filter.resolve(self)?;
         let mut params = vec![];
 
         let count = self.connection()?.query_row(
@@ -372,25 +388,26 @@ impl Database {
         &self,
         filter: &ActivityFilter,
     ) -> Result<Vec<ActivityInfo>, anyhow::Error> {
+        filter.resolve(self)?;
         let mut params = vec![];
         let conn = self.connection()?;
         let mut stmt = conn.prepare(&format!(
             "
                SELECT
-                   a.file,
-                   a.title,
-                   a.start_time,
-                   JSON(a.properties) as properties,
-                   a.created_at,
+                   activities.file,
+                   activities.title,
+                   activities.start_time,
+                   JSON(activities.properties) as properties,
+                   activities.created_at,
                    COALESCE(
                       COUNT(DISTINCT format('%d/%d/%d', z, x, y)),
                       0
                    ) as cnt_tiles
-                FROM activities a
-                LEFT JOIN activity_tiles t ON (a.id = t.activity_id)
+                FROM activities
+                LEFT JOIN activity_tiles t ON (activities.id = t.activity_id)
                 WHERE {}
                 GROUP BY 1, 2, 3, 4, 5
-                ORDER BY COALESCE(a.created_at, a.start_time, a.id) ASC
+                ORDER BY COALESCE(activities.created_at, activities.start_time, activities.id) ASC
             ",
             filter.to_query(&mut params)
         ))?;

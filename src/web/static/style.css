@@ -646,6 +646,21 @@ body {
             color: var(--text-muted);
             cursor: pointer;
         }
+
+        #nearby-filter {
+            font-size: var(--text-sm);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 0.125rem 0.5rem;
+
+            &:hover {
+                color: var(--text-primary);
+            }
+
+            & + button {
+                margin-left: 0;
+            }
+        }
     }
 
     #nearby-list {

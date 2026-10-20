@@ -9,6 +9,7 @@
 //!           | <key> in [<value>, ...]
 //!           | <key> like <string>
 //!           | has? <key>
+//!           | near(<lat>, <lng>, <meters>)
 //!
 //! <op>     := = | != | < | <= | > | >=
 //! <key>    := <word> | <string>
@@ -18,11 +19,14 @@
 //! ```
 
 use std::str::{Chars, FromStr};
+use std::sync::OnceLock;
 
 use anyhow::{Result, anyhow};
 use rusqlite::ToSql;
 use rusqlite::types::ToSqlOutput;
 use serde::{Deserialize, Deserializer};
+
+use crate::tile::LngLat;
 
 #[derive(Debug, Clone)]
 pub struct PropertyFilter {
@@ -36,6 +40,12 @@ impl PropertyFilter {
 
         self.expr.to_sql(&mut str, &mut params);
         (str, params)
+    }
+
+    /// Fills in the activities of each `near()` term with `find`, which
+    /// returns their ids as a JSON array. Must run before `to_sql`.
+    pub fn resolve(&self, find: &mut dyn FnMut(LngLat, f64) -> Result<String>) -> Result<()> {
+        self.expr.resolve(find)
     }
 }
 
@@ -65,6 +75,13 @@ enum FilterExpr {
     And(Box<FilterExpr>, Box<FilterExpr>),
     Or(Box<FilterExpr>, Box<FilterExpr>),
     Not(Box<FilterExpr>),
+    /// Passes within `radius` meters of `pt`. Needs the tracks, not just the
+    /// properties, so the matching ids are looked up before building SQL.
+    Near {
+        pt: LngLat,
+        radius: f64,
+        ids: OnceLock<String>,
+    },
 }
 
 impl FilterExpr {
@@ -80,6 +97,21 @@ impl FilterExpr {
         }
 
         Ok(expr)
+    }
+
+    fn resolve(&self, find: &mut dyn FnMut(LngLat, f64) -> Result<String>) -> Result<()> {
+        match self {
+            FilterExpr::And(lhs, rhs) | FilterExpr::Or(lhs, rhs) => {
+                lhs.resolve(find)?;
+                rhs.resolve(find)
+            }
+            FilterExpr::Not(expr) => expr.resolve(find),
+            FilterExpr::Near { pt, radius, ids } if ids.get().is_none() => {
+                let _ = ids.set(find(*pt, *radius)?);
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     fn to_sql<'a>(&'a self, str: &mut String, params: &mut Vec<&'a dyn ToSql>) {
@@ -137,6 +169,10 @@ impl FilterExpr {
                 str.push_str("properties ->> ? LIKE ?");
                 params.push(key);
                 params.push(pattern);
+            }
+            FilterExpr::Near { ids, .. } => {
+                str.push_str("activities.id IN (SELECT value FROM json_each(?))");
+                params.push(ids.get().expect("near() used before resolve()"));
             }
         }
         str.push(')');
@@ -214,6 +250,10 @@ impl<'a> FilterParser<'a> {
             return Ok(expr);
         }
 
+        if self.consume("near(") {
+            return self.read_near();
+        }
+
         let key = self.read_key()?;
 
         let expr = if self.consume("in") {
@@ -229,6 +269,30 @@ impl<'a> FilterParser<'a> {
         };
 
         Ok(expr)
+    }
+
+    /// The arguments of `near(<lat>, <lng>, <meters>)`, after the `(`.
+    fn read_near(&mut self) -> Result<FilterExpr> {
+        let lat = self.read_number()?;
+        self.expect(",")?;
+        let lng = self.read_number()?;
+        self.expect(",")?;
+        let radius = self.read_number()?;
+        self.expect(")")?;
+
+        let pt = LngLat::new(lng, lat);
+        if !(-180.0..=180.0).contains(&lng) || pt.xy().is_none() {
+            anyhow::bail!("near(): no such point on the map: {lat}, {lng}");
+        }
+        if !(radius >= 1.0 && radius.is_finite()) {
+            anyhow::bail!("near(): radius must be at least 1 meter");
+        }
+
+        Ok(FilterExpr::Near {
+            pt,
+            radius,
+            ids: OnceLock::new(),
+        })
     }
 
     fn read_key(&mut self) -> Result<String> {
@@ -437,6 +501,10 @@ mod tests {
             "k in []",
             "k in [1 2]",
             "x=y&&",
+            "near(51.5, -0.1)",
+            "near(51.5, -0.1, 0)",
+            "near(91, -0.1, 100)",
+            "near(51.5, 181, 100)",
         ];
 
         for &f in filters.iter() {
@@ -474,6 +542,9 @@ mod tests {
             // negations
             "!(key = value)",
             "!(a = 1 && b = 2)",
+            // near(lat, lng, meters)
+            "near(51.5, -0.125, 150)",
+            "!(near(-33.9, 151.2, 50.5)) && near_by = 1",
         ];
 
         // Just check if they parse, assertions about the AST shape are
@@ -577,5 +648,33 @@ mod tests {
             "((properties ->> ? = ?) OR ((properties ->> ? = ?) AND (properties ->> ? = ?)))",
             ["a", 1.0, "b", 2.0, "c", 3.0]
         );
+    }
+
+    #[test]
+    fn test_near_sql() {
+        let expr = FilterExpr::parse("near(51.5, -0.125, 150) || a = 1").unwrap();
+        let mut asked = vec![];
+        let mut find = |pt: LngLat, radius| {
+            asked.push((pt.0.y(), pt.0.x(), radius));
+            Ok(String::from("[1,2]"))
+        };
+        expr.resolve(&mut find).unwrap();
+        expr.resolve(&mut find).unwrap(); // already looked up
+        assert_eq!(asked, [(51.5, -0.125, 150.0)]);
+
+        let mut sql = String::new();
+        let mut params: Vec<&dyn ToSql> = Vec::new();
+        expr.to_sql(&mut sql, &mut params);
+        assert_eq!(
+            sql,
+            "((activities.id IN (SELECT value FROM json_each(?))) OR (properties ->> ? = ?))"
+        );
+        let actual: Vec<_> = params.iter().map(|p| p.to_sql().unwrap()).collect();
+        let expected = [
+            ToSqlOutput::from("[1,2]"),
+            ToSqlOutput::from("a"),
+            ToSqlOutput::from(1.0),
+        ];
+        assert_eq!(actual, expected);
     }
 }
