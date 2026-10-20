@@ -545,7 +545,8 @@ class NearbyPanel {
     // ~1 m precision is plenty, and keeps the filter readable.
     byId("nearby-filter").addEventListener("click", () => {
       const { lat, lng } = this.point;
-      const near = `near(${lat.toFixed(5)}, ${lng.toFixed(5)}, ${this.radius})`;
+      const term = byId("nearby-part").value;
+      const near = `${term}(${lat.toFixed(5)}, ${lng.toFixed(5)}, ${this.radius})`;
       const text = options.filter?.trim();
       const box = document.querySelector('#map-overlay [key="filter"]');
       // Parenthesized, as && binds tighter than an existing ||.
@@ -954,6 +955,7 @@ function filterHelpContent() {
       <li><code>key like "pattern%"</code>    — match a pattern, <code>%</code> is a wildcard</li>
       <li><code>has? "key with spaces"</code> — check if a property exists</li>
       <li><code>near(lat, lng, meters)</code> — passes within a circle</li>
+      <li><code>starts_near(lat, lng, meters)</code>, <code>ends_near(…)</code> — starts or ends within a circle</li>
     </ul>
 
     <div class="__heading">Computed Properties</div>

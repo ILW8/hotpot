@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 
 use crate::db::{ActivityFilter, Config, Database, decode_line};
+use crate::filter::TrackPart;
 use crate::tile::{LngLat, Tile};
 
 /// Activities returned per page, newest first.
@@ -106,15 +107,27 @@ impl Grid {
             .collect()
     }
 
+    fn masked(&self, p: &Coord) -> bool {
+        self.masks
+            .iter()
+            .any(|(c, r)| (p.x - c.x).powi(2) + (p.y - c.y).powi(2) <= r * r)
+    }
+
     /// The parts of a line that the renderer draws: masked vertices are
     /// dropped and break the line.
     fn visible<'a>(&'a self, line: &'a [Coord]) -> impl Iterator<Item = &'a [Coord]> {
-        line.split(|p| {
-            self.masks
-                .iter()
-                .any(|(c, r)| (p.x - c.x).powi(2) + (p.y - c.y).powi(2) <= r * r)
-        })
-        .filter(|run| run.len() > 1)
+        line.split(|p| self.masked(p)).filter(|run| run.len() > 1)
+    }
+
+    /// `p`, the first or last vertex of a stored line, if the track starts or
+    /// ends there and that isn't masked. Lines that only cross a tile start
+    /// and end on its edge, so a track's own ends are the ones inside.
+    // ponytail: an end that rounds onto a tile edge is missed (~0.1%, 8 of
+    // 8,388 in a real DB). Chain the lines across tiles if that matters.
+    fn track_end(&self, p: Option<&Coord>) -> Option<Coord> {
+        p.filter(|p| p.x % self.extent != 0.0 && p.y % self.extent != 0.0)
+            .filter(|p| !self.masked(p))
+            .copied()
     }
 }
 
@@ -135,7 +148,7 @@ pub fn find(
     filter: &ActivityFilter,
     offset: usize,
 ) -> Result<Nearby> {
-    let nearest = scan(db, config, pt, radius, filter)?;
+    let nearest = scan(db, config, pt, radius, TrackPart::Any, filter)?;
 
     let ids = serde_json::to_string(&nearest.keys().collect::<Vec<_>>())?;
     let conn = db.connection()?;
@@ -178,16 +191,16 @@ pub fn find(
     })
 }
 
-/// Ids of the activities passing within `radius` meters of `pt`, as a JSON
-/// array, for the filter language's `near()`.
-pub fn ids_near(db: &Database, pt: LngLat, radius: f64) -> Result<String> {
+/// Ids of the activities whose `part` is within `radius` meters of `pt`, as a
+/// JSON array, for the filter language's `near()` and friends.
+pub fn ids_near(db: &Database, pt: LngLat, radius: f64, part: TrackPart) -> Result<String> {
     // Every map tile asks again, so keep the answer until activities change.
     let (count, last): (i64, i64) = db.connection()?.query_row(
         "SELECT count(*), COALESCE(max(id), 0) FROM activities",
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    let key = format!("{},{},{radius},{count},{last}", pt.0.x(), pt.0.y());
+    let key = format!("{},{},{radius},{part:?},{count},{last}", pt.0.x(), pt.0.y());
 
     // Held while scanning, so a screenful of tiles waits for one scan instead
     // of each running its own.
@@ -201,19 +214,20 @@ pub fn ids_near(db: &Database, pt: LngLat, radius: f64) -> Result<String> {
     }
 
     let config = db.load_config()?;
-    let nearest = scan(db, &config, pt, radius, &ActivityFilter::default())?;
+    let nearest = scan(db, &config, pt, radius, part, &ActivityFilter::default())?;
     let ids = serde_json::to_string(&nearest.keys().collect::<Vec<_>>())?;
     cache.insert(key, ids.clone());
     Ok(ids)
 }
 
-/// Closest approach in meters of each activity matching `filter` that passes
-/// within `radius` meters of `pt`.
+/// Closest approach in meters of each activity matching `filter` whose `part`
+/// is within `radius` meters of `pt`.
 fn scan(
     db: &Database,
     config: &Config,
     pt: LngLat,
     radius: f64,
+    part: TrackPart,
     filter: &ActivityFilter,
 ) -> Result<HashMap<i64, f64>> {
     filter.resolve(db)?;
@@ -252,13 +266,19 @@ fn scan(
             AND {expr};",
     ))?;
 
+    let from_center = |p: Coord| (p.x - center.x).hypot(p.y - center.y);
     let mut nearest: HashMap<i64, f64> = HashMap::new();
     let mut rows = stmt.query(params.as_slice())?;
     while let Some(row) = rows.next()? {
         let tile = Tile::new(row.get_unwrap(1), row.get_unwrap(2), grid.z);
         let line = grid.decode(&tile, row.get_ref(3)?.as_blob()?);
 
-        if let Some(dist) = closest(center, grid.visible(&line))
+        let dist = match part {
+            TrackPart::Any => closest(center, grid.visible(&line)),
+            TrackPart::Start => grid.track_end(line.first()).map(from_center),
+            TrackPart::End => grid.track_end(line.last()).map(from_center),
+        };
+        if let Some(dist) = dist
             && dist <= radius_px
         {
             let best = nearest.entry(row.get_unwrap(0)).or_insert(dist);
@@ -319,6 +339,8 @@ mod tests {
             activity_mask: masks,
             ..Config::default()
         };
+        // The filter language reads it from the database.
+        db.save_config(&config).unwrap();
 
         let tracks = [
             (
@@ -423,6 +445,52 @@ mod tests {
         let filter = ActivityFilter::new(None, None, Some(run.parse().unwrap()));
         assert_eq!(db.activity_count(&filter).unwrap(), 1);
         assert_eq!(db.activity_info(&filter).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_starts_ends_near_filter() {
+        let (db, config) = fixture(vec![]);
+        let find = |filter: &str| names(&db, &config, 100.0, 1000.0, filter);
+
+        // The ride runs east from -0.13 to -0.12, the run east at 200 m north.
+        assert_eq!(find(&format!("starts_near({LAT}, -0.13, 20)")), ["ride"]);
+        assert!(find(&format!("ends_near({LAT}, -0.13, 20)")).is_empty());
+        assert_eq!(find(&format!("ends_near({LAT}, -0.12, 20)")), ["ride"]);
+        let run = north(200.0);
+        assert_eq!(find(&format!("starts_near({run}, -0.1255, 10)")), ["run"]);
+        assert_eq!(find(&format!("ends_near({run}, -0.1245, 10)")), ["run"]);
+
+        // Passing by isn't starting, including where the ride crosses into
+        // the next tile and its stored line there starts.
+        let world = (1 << Grid::new(&config).z) as f64;
+        let edge = ((-0.13 + 180.0) / 360.0 * world).ceil() / world * 360.0 - 180.0;
+        for lng in [-0.125, edge] {
+            assert_eq!(find(&format!("near({LAT}, {lng}, 20)")), ["ride"]);
+            assert!(find(&format!("starts_near({LAT}, {lng}, 20)")).is_empty());
+            assert!(find(&format!("ends_near({LAT}, {lng}, 20)")).is_empty());
+        }
+
+        let commute = format!("starts_near({LAT}, -0.13, 20) && ends_near({LAT}, -0.12, 20)");
+        let filter = ActivityFilter::new(None, None, Some(commute.parse().unwrap()));
+        assert_eq!(db.activity_count(&filter).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_masked_start_is_hidden() {
+        let mask = ActivityMask {
+            name: "home".to_string(),
+            lat: LAT,
+            lng: -0.13,
+            radius: 60.0,
+        };
+        let (db, config) = fixture(vec![mask]);
+        let find = |filter: &str| names(&db, &config, 100.0, 1000.0, filter);
+
+        // Straight, so the ride is stored as one segment per tile, and the
+        // masked start hides the whole first one (~250 m), as on the map.
+        assert_eq!(find(&format!("near({LAT}, -0.13, 300)")), ["ride"]);
+        assert!(find(&format!("starts_near({LAT}, -0.13, 300)")).is_empty());
+        assert_eq!(find(&format!("ends_near({LAT}, -0.12, 20)")), ["ride"]);
     }
 
     #[test]

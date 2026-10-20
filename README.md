@@ -91,7 +91,8 @@ point, using the same date and property filters as the heatmap. Drag the
 handle on the circle to change the search radius, and click a row to see all
 of its properties (the up and down arrows then move between rows). **Filter**
 adds the circle to the property filter as a `near()` term, so the heatmap only
-shows activities passing through it. This exposes activity names, times,
+shows activities passing through it (or `starts_near()` / `ends_near()`, picked
+next to the button). This exposes activity names, times,
 properties, and individual tracks, so think twice before enabling it on an
 internet-facing server.
 
@@ -168,6 +169,10 @@ has? heart_rate
 # Passes within 150 m of a point (latitude, longitude)
 near(52.52000, 13.40500, 150)
 
+# Starts or ends within 150 m of a point
+starts_near(52.52000, 13.40500, 150)
+ends_near(52.52000, 13.40500, 150)
+
 # Combine multiple expressions
 elapsed_time < 3600 && elevation_gain > 300
 elevation_gain > 1000 || (average_speed > 30 && commute = true)
@@ -178,7 +183,10 @@ the exact names vary based on your data.
 
 `near()` looks at the tracks rather than the properties, ignoring parts hidden
 by [area masks](#privacy), so it matches the same activities as clicking the
-map with `--nearby`.
+map with `--nearby`. Likewise, `starts_near()` and `ends_near()` use the ends
+of the track as drawn: after `--trim`, and not at all if a mask hides them. A
+track in several pieces (split by a GPS gap of over 5 km, say) starts and ends
+once per piece.
 
 In addition, several standard properties are computed automatically from the GPS
 data for all activities, regardless of how they were imported:
