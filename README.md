@@ -87,9 +87,10 @@ hotpot serve
 ```
 
 Add `--nearby` to click the map and list the activities passing near that
-point, using the same date and property filters as the heatmap. This exposes
-activity names, times, and individual tracks, so think twice before enabling
-it on an internet-facing server.
+point, using the same date and property filters as the heatmap. Drag the
+handle on the circle to change the search radius. This exposes activity
+names, times, and individual tracks, so think twice before enabling it on an
+internet-facing server.
 
 To generate a static image instead:
 

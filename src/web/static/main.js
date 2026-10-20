@@ -403,19 +403,44 @@ class ExportButton {
   }
 }
 
+// ponytail: flat-earth approximation, fine at the ≤ 1 km nearby radius.
+const metersPerDegree = (lat) => [
+  111320 * Math.cos((lat * Math.PI) / 180),
+  111320,
+];
+
+// [lng, lat] `meters` from `center`, `angle` radians counter-clockwise of east.
+function offset({ lng, lat }, meters, angle) {
+  const [mx, my] = metersPerDegree(lat);
+  return [
+    lng + (meters * Math.cos(angle)) / mx,
+    lat + (meters * Math.sin(angle)) / my,
+  ];
+}
+
+// Inverse of `offset`: [meters, angle] of `point` seen from `center`.
+function polar(center, point) {
+  const [mx, my] = metersPerDegree(center.lat);
+  const dx = (point.lng - center.lng) * mx;
+  const dy = (point.lat - center.lat) * my;
+  return [Math.hypot(dx, dy), Math.atan2(dy, dx)];
+}
+
 // Approximate circle around `center` as a GeoJSON LineString.
-function circle({ lng, lat }, meters, steps = 64) {
-  const dLat = meters / 111320;
-  const dLng = dLat / Math.cos((lat * Math.PI) / 180);
-  const coordinates = [...Array(steps + 1).keys()].map((i) => {
-    const angle = (i / steps) * 2 * Math.PI;
-    return [lng + dLng * Math.cos(angle), lat + dLat * Math.sin(angle)];
-  });
+function circle(center, meters, steps = 64) {
+  const coordinates = [...Array(steps + 1).keys()].map((i) =>
+    offset(center, meters, (i / steps) * 2 * Math.PI),
+  );
   return { type: "LineString", coordinates };
 }
 
+// Whole meters within the panel's 10 m to 1 km (50 m if not a number).
+const clampRadius = (meters) =>
+  Math.min(1000, Math.max(10, Math.round(meters))) || 50;
+
 // Click the map to list the activities passing within `options.radius` of
-// that point. Hovering a row highlights its track; clicking keeps it.
+// that point. Hovering a row highlights its track; clicking keeps it. Drag
+// the handle on the circle, or type in the panel, to change the radius.
 class NearbyPanel {
   static dateFormat = new Intl.DateTimeFormat(undefined, {
     dateStyle: "medium",
@@ -423,50 +448,130 @@ class NearbyPanel {
   });
 
   constructor(map, options) {
+    const { div, span } = createElement;
     const byId = (id) => document.getElementById(id);
     this.map = map;
     this.options = options;
     this.node = byId("nearby");
     this.list = byId("nearby-list");
     this.count = byId("nearby-count");
+    this.input = byId("radius");
+    this.label = span();
 
     this.point = null;
+    this.angle = 0; // of the handle while dragged, radians from east
     this.hovered = null;
     this.selected = null;
     this.tracks = new Map();
     this.requests = 0;
     this.data = { type: "FeatureCollection", features: [] };
 
+    // Not a draggable Marker: those only track the pointer over the map
+    // canvas, so they'd stall over the panel and miss a release outside it.
+    const handle = div({ class: "nearby-handle" }, this.label);
+    this.handle = new maplibregl.Marker({ element: handle });
+    for (const type of ["mousedown", "touchstart", "touchmove", "touchend"]) {
+      handle.addEventListener(type, (ev) => ev.stopPropagation()); // no panning
+    }
+    handle.addEventListener("pointerdown", (ev) => {
+      cancelAnimationFrame(this.spring);
+      handle.setPointerCapture(ev.pointerId);
+    });
+    handle.addEventListener("pointermove", (ev) => {
+      if (!handle.hasPointerCapture(ev.pointerId)) return;
+      const box = map.getCanvasContainer().getBoundingClientRect();
+      const lngLat = map.unproject([ev.clientX - box.left, ev.clientY - box.top]);
+      const [meters, angle] = polar(this.point, lngLat);
+      this.angle = angle;
+      this.setRadius(meters, false);
+    });
+    handle.addEventListener("lostpointercapture", () => {
+      this.setRadius(this.radius);
+      this.springBack();
+    });
+    this.setRadius(+options.radius, false);
+
     map.on("click", (ev) => {
+      if (handle.contains(ev.originalEvent.target)) return;
       this.point = ev.lngLat.wrap();
       this.selected = null;
+      this.handle.setLngLat(this.edge).addTo(map);
       this.update();
     });
     options.watch(["radius", "before", "after", "filter"], () => this.update());
+    this.input.addEventListener("change", () =>
+      this.setRadius(this.input.valueAsNumber || this.radius),
+    );
     this.list.addEventListener("mouseleave", () => this.highlight(null));
     byId("nearby-close").addEventListener("click", () => {
       this.point = null;
       this.node.hidden = true;
+      this.handle.remove();
       this.draw();
     });
+  }
+
+  get edge() {
+    return offset(this.point, this.radius, this.angle);
+  }
+
+  // Swing the released handle back to east on an underdamped spring, which
+  // overshoots ~15% and settles in under a second at 60-240 Hz.
+  springBack() {
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) this.angle = 0;
+    let velocity = 0;
+    let last = performance.now();
+    const step = (now) => {
+      const dt = Math.min(now - last, 32) / 1000;
+      last = now;
+      velocity += (-400 * this.angle - 20 * velocity) * dt;
+      this.angle += velocity * dt;
+      if (Math.abs(this.angle) + Math.abs(velocity) < 1e-3) this.angle = 0;
+      this.draw();
+      if (this.angle) this.spring = requestAnimationFrame(step);
+    };
+    step(last);
+  }
+
+  // Redraws now; `commit` also re-queries, which a drag leaves to release.
+  setRadius(meters, commit = true) {
+    this.radius = clampRadius(meters);
+    this.input.value = this.radius;
+    this.label.innerText = `${this.radius} m`;
+    if (commit) this.options.radius = `${this.radius}`;
+    this.draw();
   }
 
   // Call after (re-)adding the heatmap layer, so this stays on top.
   addLayer() {
     if (this.map.getSource("nearby")) {
-      this.map.removeLayer("nearby").removeSource("nearby");
+      this.map
+        .removeLayer("nearby")
+        .removeLayer("nearby-dots")
+        .removeSource("nearby");
     }
 
+    // line-dasharray can't come from a feature property, hence two layers.
+    const paint = {
+      "line-color": ["get", "color"],
+      "line-width": ["get", "width"],
+    };
     this.map
       .addSource("nearby", { type: "geojson", data: this.data })
       .addLayer({
         id: "nearby",
         type: "line",
         source: "nearby",
-        paint: {
-          "line-color": ["get", "color"],
-          "line-width": ["get", "width"],
-        },
+        filter: ["!", ["has", "dots"]],
+        paint,
+      })
+      .addLayer({
+        id: "nearby-dots",
+        type: "line",
+        source: "nearby",
+        filter: ["has", "dots"],
+        layout: { "line-cap": "round" },
+        paint: { ...paint, "line-dasharray": [0, 2] },
       });
   }
 
@@ -475,7 +580,8 @@ class NearbyPanel {
 
     const { div } = createElement;
     const { lng, lat } = this.point;
-    const { radius, before, after, filter } = this.options;
+    const { radius } = this;
+    const { before, after, filter } = this.options;
     const qs = encodeQueryString({ lat, lng, radius, before, after, filter });
 
     this.node.hidden = false;
@@ -569,6 +675,9 @@ class NearbyPanel {
   }
 
   async draw() {
+    // Before any await, so a dragged handle snaps onto the clamped circle.
+    if (this.point) this.handle.setLngLat(this.edge);
+
     const id = this.shown;
     if (id && !this.tracks.has(id)) {
       this.tracks.set(
@@ -581,15 +690,20 @@ class NearbyPanel {
     const track = id ? await this.tracks.get(id) : null;
     if (id !== this.shown) return;
 
-    const feature = (geometry, color, width) => ({
+    const feature = (geometry, color, width, props) => ({
       type: "Feature",
       geometry,
-      properties: { color, width },
+      properties: { color, width, ...props },
+    });
+    const { point } = this;
+    const spoke = () => ({
+      type: "LineString",
+      coordinates: [point.toArray(), this.edge],
     });
 
     this.data.features = [
-      this.point &&
-        feature(circle(this.point, +this.options.radius), "#6b8fff", 2),
+      point && feature(circle(point, this.radius), "#6b8fff", 2),
+      point && feature(spoke(), "#6b8fff", 2, { dots: true }),
       track && feature(track, "#00e5ff", 3),
     ].filter(Boolean);
     this.map.getSource("nearby")?.setData(this.data);
