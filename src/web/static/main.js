@@ -459,7 +459,7 @@ class NearbyPanel {
     this.label = span();
 
     this.point = null;
-    this.angle = 0; // of the handle, radians counter-clockwise of east
+    this.angle = 0; // of the handle while dragged, radians from east
     this.hovered = null;
     this.selected = null;
     this.tracks = new Map();
@@ -484,9 +484,11 @@ class NearbyPanel {
       this.angle = angle;
       this.setRadius(meters, false);
     });
-    handle.addEventListener("lostpointercapture", () =>
-      this.setRadius(this.radius),
-    );
+    // On release, the handle jumps back to the east edge.
+    handle.addEventListener("lostpointercapture", () => {
+      this.angle = 0;
+      this.setRadius(this.radius);
+    });
     this.setRadius(+options.radius, false);
 
     map.on("click", (ev) => {
