@@ -627,7 +627,8 @@ body {
         }
 
         input {
-            width: 4.5em;
+            /* 8 digits (20,000 km reaches anywhere), plus the spinner */
+            width: calc(8ch + 1.75em);
             font-family: var(--font-ui);
             font-size: var(--text-sm);
             color: var(--text-primary);
