@@ -44,6 +44,9 @@ pub struct NearbyActivity {
     total_distance: Option<f64>,
     /// Closest approach to the point, in meters.
     distance: f64,
+    // ponytail: every row carries its properties (~2 KB for a Strava ride),
+    // so ~200 KB at MAX_RESULTS. Fetch them per activity if that gets slow.
+    properties: Value,
 }
 
 /// One pixel plane for all stored tiles of the highest zoom level, with y
@@ -191,7 +194,8 @@ pub fn find(
             CAST(COALESCE(title, properties ->> 'activity_name') AS TEXT), \
             start_time, \
             CAST(properties ->> 'activity_type' AS TEXT), \
-            CAST(properties ->> 'total_distance' AS REAL) \
+            CAST(properties ->> 'total_distance' AS REAL), \
+            JSON(properties) \
         FROM activities \
         WHERE id IN (SELECT value FROM json_each(?)) \
         ORDER BY start_time DESC \
@@ -209,6 +213,8 @@ pub fn find(
                 activity_type: row.get(4)?,
                 total_distance: row.get(5)?,
                 distance: nearest[&id] / px_per_meter,
+                properties: serde_json::from_str(&row.get::<_, String>(6)?)
+                    .expect("activity `properties` should contain valid JSON"),
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -325,6 +331,7 @@ mod tests {
         assert_eq!(found.total, 1);
         let dist = found.activities[0].distance;
         assert!((dist - 30.0).abs() < 0.5, "expected ~30 m, got {dist}");
+        assert_eq!(found.activities[0].properties["activity_type"], "Ride");
     }
 
     #[test]
