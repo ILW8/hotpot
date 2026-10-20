@@ -468,7 +468,8 @@ function propertyList(props) {
 }
 
 // Click the map to list the activities passing within `options.radius` of
-// that point. Hovering a row highlights its track; clicking keeps it. Drag
+// that point. Hovering a row highlights its track; clicking keeps it, and
+// the arrow keys then move the selection up and down the list. Drag
 // the handle on the circle, or type in the panel, to change the radius.
 class NearbyPanel {
   static dateFormat = new Intl.DateTimeFormat(undefined, {
@@ -670,7 +671,21 @@ class NearbyPanel {
           if (!row.querySelector("dl")) row.append(propertyList(act.properties));
           this.highlight(act.id, true);
         },
-        keydown: (ev) => ev.key === "Enter" && row.click(),
+        keydown: (ev) => {
+          if (ev.key === "Enter") row.click();
+          // Up and down select the neighbouring row instead of scrolling.
+          const next = {
+            ArrowDown: row.nextElementSibling,
+            ArrowUp: row.previousElementSibling,
+          }[ev.key];
+          if (!next?.matches(".__row")) return;
+          ev.preventDefault();
+          next.click();
+          // Top-aligned: its properties usually overflow the list, and
+          // "nearest" would show their end when moving up.
+          next.focus({ preventScroll: true });
+          next.scrollIntoView({ block: "start" });
+        },
       },
       [
         div({ class: "__title" }, [
