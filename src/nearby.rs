@@ -19,9 +19,6 @@ use time::OffsetDateTime;
 use crate::db::{ActivityFilter, Config, Database, decode_line};
 use crate::tile::{LngLat, Tile};
 
-/// Largest search radius, in meters.
-pub const MAX_RADIUS: f64 = 5000.0;
-
 /// Most activities returned by one query, newest first.
 const MAX_RESULTS: usize = 100;
 

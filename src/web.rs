@@ -332,8 +332,9 @@ async fn get_nearby(
     State(AppState { db, db_config, .. }): State<AppState>,
     Query(params): Query<NearbyQueryParams>,
 ) -> impl IntoResponse {
-    if !(1.0..=nearby::MAX_RADIUS).contains(&params.radius) {
-        let msg = format!("radius must be in [1, {}] meters", nearby::MAX_RADIUS);
+    // No upper limit: a huge radius is slow, not wrong. Rejects NaN and inf.
+    if !(1.0..f64::INFINITY).contains(&params.radius) {
+        let msg = "radius must be a finite number of meters, at least 1";
         return (StatusCode::BAD_REQUEST, msg).into_response();
     }
 
