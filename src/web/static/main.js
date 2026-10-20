@@ -403,7 +403,8 @@ class ExportButton {
   }
 }
 
-// ponytail: flat-earth approximation, fine at the ≤ 1 km nearby radius.
+// ponytail: flat-earth approximation; strays from the server's Mercator
+// circle by about 1% per 100 km of radius.
 const metersPerDegree = (lat) => [
   111320 * Math.cos((lat * Math.PI) / 180),
   111320,
@@ -434,9 +435,8 @@ function circle(center, meters, steps = 64) {
   return { type: "LineString", coordinates };
 }
 
-// Whole meters within the panel's 10 m to 1 km (50 m if not a number).
-const clampRadius = (meters) =>
-  Math.min(1000, Math.max(10, Math.round(meters))) || 50;
+// Whole meters, at least 10 (50 if not a number).
+const clampRadius = (meters) => Math.max(10, Math.round(meters)) || 50;
 
 // An activity's properties as a sorted key/value list. `*_time` numbers are
 // shown as dates (epoch seconds) or h:mm:ss (durations), raw on hover.
