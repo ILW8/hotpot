@@ -473,9 +473,10 @@ class NearbyPanel {
     for (const type of ["mousedown", "touchstart", "touchmove", "touchend"]) {
       handle.addEventListener(type, (ev) => ev.stopPropagation()); // no panning
     }
-    handle.addEventListener("pointerdown", (ev) =>
-      handle.setPointerCapture(ev.pointerId),
-    );
+    handle.addEventListener("pointerdown", (ev) => {
+      cancelAnimationFrame(this.spring);
+      handle.setPointerCapture(ev.pointerId);
+    });
     handle.addEventListener("pointermove", (ev) => {
       if (!handle.hasPointerCapture(ev.pointerId)) return;
       const box = map.getCanvasContainer().getBoundingClientRect();
@@ -484,10 +485,9 @@ class NearbyPanel {
       this.angle = angle;
       this.setRadius(meters, false);
     });
-    // On release, the handle jumps back to the east edge.
     handle.addEventListener("lostpointercapture", () => {
-      this.angle = 0;
       this.setRadius(this.radius);
+      this.springBack();
     });
     this.setRadius(+options.radius, false);
 
@@ -515,7 +515,25 @@ class NearbyPanel {
     return offset(this.point, this.radius, this.angle);
   }
 
-  // Redraws now; `commit` also re-queries, which a drag leaves to `dragend`.
+  // Swing the released handle back to east on an underdamped spring, which
+  // overshoots ~15% and settles in under a second at 60-240 Hz.
+  springBack() {
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) this.angle = 0;
+    let velocity = 0;
+    let last = performance.now();
+    const step = (now) => {
+      const dt = Math.min(now - last, 32) / 1000;
+      last = now;
+      velocity += (-400 * this.angle - 20 * velocity) * dt;
+      this.angle += velocity * dt;
+      if (Math.abs(this.angle) + Math.abs(velocity) < 1e-3) this.angle = 0;
+      this.draw();
+      if (this.angle) this.spring = requestAnimationFrame(step);
+    };
+    step(last);
+  }
+
+  // Redraws now; `commit` also re-queries, which a drag leaves to release.
   setRadius(meters, commit = true) {
     this.radius = clampRadius(meters);
     this.input.value = this.radius;
