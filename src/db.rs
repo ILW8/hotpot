@@ -326,7 +326,9 @@ impl ActivityFilter {
     /// run before `to_query`; repeat calls are free.
     pub fn resolve(&self, db: &Database) -> Result<()> {
         match &self.props {
-            Some(props) => props.resolve(&mut |pt, radius| crate::nearby::ids_near(db, pt, radius)),
+            Some(props) => {
+                props.resolve(&mut |pt, radius, part| crate::nearby::ids_near(db, pt, radius, part))
+            }
             None => Ok(()),
         }
     }

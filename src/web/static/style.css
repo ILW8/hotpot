@@ -626,9 +626,8 @@ body {
             color: var(--text-primary);
         }
 
-        input {
-            /* 8 digits (20,000 km reaches anywhere), plus the spinner */
-            width: calc(8ch + 1.75em);
+        input,
+        select {
             font-family: var(--font-ui);
             font-size: var(--text-sm);
             color: var(--text-primary);
@@ -636,6 +635,15 @@ body {
             border: 1px solid var(--border);
             border-radius: var(--radius-sm);
             padding: 0.125rem 0.25rem;
+        }
+
+        input {
+            /* 8 digits (20,000 km reaches anywhere), plus the spinner */
+            width: calc(8ch + 1.75em);
+        }
+
+        select {
+            margin-left: auto;
         }
 
         button {
@@ -648,6 +656,7 @@ body {
         }
 
         #nearby-filter {
+            margin-left: 0;
             font-size: var(--text-sm);
             border: 1px solid var(--border);
             border-radius: var(--radius-sm);
